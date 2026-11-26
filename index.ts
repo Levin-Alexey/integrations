@@ -8,11 +8,25 @@ type Bindings = {
 };
 
 type SiteMainPayload = {
-    name?: string;
-    contactInfo?: string;
-    niche?: string;
+    name?: string | null;
+    contactInfo?: string | null;
+    niche?: string | null;
     selectedFeatureLabels?: string[];
-    source?: string;
+    source?: string | null;
+};
+
+type VkKidsLeadPayload = {
+    lead_id?: number | null;
+    vk_id?: number | null;
+    parent_name?: string | null;
+    child_name?: string | null;
+    course?: string | null;
+    child_age_group?: string | null;
+    experience_level?: string | null;
+    notes?: string | null;
+    preferred_time_custom?: string | null;
+    phone?: string | null;
+    email?: string | null;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -21,27 +35,29 @@ const app = new Hono<{ Bindings: Bindings }>();
 app.use(
     '/hooks/*',
     cors({
-        origin: '*',
+        origin: (origin) => origin || '*',
         allowMethods: ['POST', 'OPTIONS'],
-        allowHeaders: ['Content-Type'],
+        allowHeaders: ['Content-Type', 'X-Webhook-Secret'],
+        maxAge: 86400,
     })
 );
 
-// Защита от спама по секретному ключу в URL (?secret=...)
 app.use('/hooks/*', async (c, next) => {
-    if (c.req.query('secret') !== c.env.WEBHOOK_SECRET) {
+    const providedSecret = c.req.header('X-Webhook-Secret') || c.req.query('secret');
+
+    if (!providedSecret || providedSecret !== c.env.WEBHOOK_SECRET) {
         return c.json({ error: 'Unauthorized' }, 401);
     }
     await next();
 });
 
 // Экранирование спецсимволов, чтобы Telegram не выдал ошибку при символах <, >, & в тексте клиента
-function escapeHtml(str?: string): string {
-    if (!str) return '-';
-    return str
-        .replace(/&/g, '&')
-        .replace(/</g, '<')
-        .replace(/>/g, '>');
+function escapeHtml(value: unknown): string {
+    if (value === null || value === undefined || value === '') return '-';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
 }
 
 // Отправка сообщения в Telegram
@@ -53,6 +69,7 @@ async function sendTelegram(env: Bindings, text: string) {
             chat_id: env.TG_CHAT_ID,
             text,
             parse_mode: 'HTML',
+            disable_web_page_preview: true,
         }),
     });
 
@@ -88,6 +105,55 @@ app.post('/hooks/site-main', async (c) => {
     ].join('\n');
 
     const tg = await sendTelegram(c.env, text);
+
+    if (!tg.ok) {
+        return c.json({ ok: false, telegramError: tg.result }, 502);
+    }
+
+    return c.json({ ok: true });
+});
+
+const COURSE_LABELS: Record<string, string> = {
+    ai: 'ИИ и нейросети',
+    programming: 'Программирование',
+    need_help: 'Нужна помощь с выбором',
+};
+
+app.post('/hooks/vk-kids', async (c) => {
+    const data = await c.req.json<VkKidsLeadPayload>();
+
+    const courseName = data.course
+        ? COURSE_LABELS[data.course] || escapeHtml(data.course)
+        : '-';
+    const ageGroup = data.child_age_group
+        ? escapeHtml(data.child_age_group.replace(/_/g, '–'))
+        : '-';
+    const vkLink = data.vk_id
+        ? `<a href="https://vk.com/id${data.vk_id}">id${data.vk_id}</a>`
+        : '-';
+
+    const lines = [
+        `🎓 <b>Новая заявка из ВК: Обучение детей</b>${data.lead_id ? ` (#${data.lead_id})` : ''}`,
+        '',
+        `👨‍👩‍👧 <b>Родитель:</b> ${escapeHtml(data.parent_name)}`,
+        `🧒 <b>Ребёнок:</b> ${escapeHtml(data.child_name)} (возраст: ${ageGroup})`,
+        `📚 <b>Направление:</b> ${courseName}`,
+        `📱 <b>Телефон / мессенджер:</b> ${escapeHtml(data.phone)}`,
+        `📧 <b>Email:</b> ${escapeHtml(data.email)}`,
+        `⏰ <b>Удобное время:</b> ${escapeHtml(data.preferred_time_custom)}`,
+    ];
+
+    if (data.experience_level) {
+        lines.push(`📊 <b>Опыт:</b> ${escapeHtml(data.experience_level)}`);
+    }
+
+    if (data.notes) {
+        lines.push(`📝 <b>Заметки о ребёнке:</b> ${escapeHtml(data.notes)}`);
+    }
+
+    lines.push('', `🔵 <b>Профиль ВК:</b> ${vkLink}`);
+
+    const tg = await sendTelegram(c.env, lines.join('\n'));
 
     if (!tg.ok) {
         return c.json({ ok: false, telegramError: tg.result }, 502);
