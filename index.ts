@@ -56,9 +56,11 @@ async function sendTelegram(env: Bindings, text: string) {
         }),
     });
 
+    const result = await res.json();
     if (!res.ok) {
-        console.error('Telegram API error:', await res.text());
+        console.error('Telegram API error:', JSON.stringify(result));
     }
+    return { ok: res.ok, status: res.status, result };
 }
 
 // =====================================================================
@@ -85,7 +87,11 @@ app.post('/hooks/site-main', async (c) => {
         `🌐 <i>Источник: ${escapeHtml(data.source || 'site-main_t/contact-form')}</i>`,
     ].join('\n');
 
-    c.executionCtx.waitUntil(sendTelegram(c.env, text));
+    const tg = await sendTelegram(c.env, text);
+
+    if (!tg.ok) {
+        return c.json({ ok: false, telegramError: tg.result }, 502);
+    }
 
     return c.json({ ok: true });
 });
